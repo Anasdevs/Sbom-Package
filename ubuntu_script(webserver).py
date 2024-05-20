@@ -37,34 +37,33 @@ def query_ubuntu_security_tracker(package_name, session):
         print(f"Request failed for {package_name}: {e}")
         return []
 
-def query_cve_details(cve_id, session):
-    url = f"https://cveawg.mitre.org/api/cve/{cve_id}"
-    print(f"Querying CVE.org for {cve_id}...")
+def clean_description(description):
+    return description.replace("\n", "")
+
+def query_cve_details(cve_id):
     try:
-        response = session.get(url)
+        response = requests.get(f"https://cveawg.mitre.org/api/cve/{cve_id}")
         response.raise_for_status()
-        try:
-            cve_data = response.json()
-            cve_details = {
-                "cveId": cve_id,
-                "description": cve_data['containers']['cna']['descriptions'][0]['value'],
-                "cvssScore": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['baseScore'],
-                "cvssVector": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['vectorString'],
-                "severity": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['baseSeverity'],
-                "affectedVersions": [
-                    v['version'] for a in cve_data['containers']['cna']['affected'] for v in a['versions']
-                ],
-                "affectedVersionsRange": [
-                    (v.get('lessThan'), v.get('version'), v.get('versionType')) for a in cve_data['containers']['cna']['affected'] for v in a['versions']
-                ]
-            }
-            return cve_details
-        except json.JSONDecodeError:
-            print(f"Invalid JSON response for {cve_id}: {response.text}")
-            return None
-    except requests.RequestException as e:
-        print(f"Request failed for {cve_id}: {e}")
+        cve_data = response.json()
+
+        cve_details = {
+            "cveId": cve_id,
+            "description": clean_description(cve_data['containers']['cna']['descriptions'][0]['value']),
+            "cvssScore": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['baseScore'],
+            "cvssVector": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['vectorString'],
+            "severity": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['baseSeverity'],
+            "affectedVersions": [
+                v['version'] for a in cve_data['containers']['cna']['affected'] for v in a['versions']
+            ],
+            "affectedVersionsRange": [
+                (v.get('lessThan'), v.get('version'), v.get('versionType')) for a in cve_data['containers']['cna']['affected'] for v in a['versions']
+            ]
+        }
+        return cve_details
+    except requests.exceptions.RequestException as e:
+        print(f"Error querying CVE details for {cve_id}: {e}")
         return None
+
 
 def version_to_tuple(version):
     return tuple(map(int, re.findall(r'\d+', version)))
