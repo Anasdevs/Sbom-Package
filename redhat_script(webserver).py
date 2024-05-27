@@ -101,7 +101,7 @@ def generate_packages_json():
     for line in package_list_output.split('\n')[1:]:
         parts = line.split()
         if len(parts) >= 3:
-            name_arch, version, repository = parts[0], parts[1], parts[2]
+            name_arch, version = parts[0], parts[1]
             if name_arch.startswith('amazon-') or name_arch.startswith('aws-'):
                 continue
             name, arch = name_arch.rsplit('.', 1)
@@ -109,8 +109,7 @@ def generate_packages_json():
             packages_data.append({
                 "name": name,
                 "version": version,
-                "architecture": arch,
-                "repository": repository
+                "architecture": arch
             })
 
     print("Starting to process packages concurrently...")
