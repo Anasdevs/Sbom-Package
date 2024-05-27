@@ -12,14 +12,6 @@ def normalize_version(version):
     version = re.sub(r'[^0-9.]', '', version)
     return version
 
-def is_ubuntu_package(package_name):
-    try:
-        apt_cache_output = subprocess.check_output(["apt-cache", "policy", package_name])
-        apt_cache_str = apt_cache_output.decode('utf-8')
-        return 'ubuntu' in apt_cache_str.lower()
-    except subprocess.CalledProcessError:
-        return False
-
 def query_ubuntu_security_tracker(package_name, session):
     url = f"https://ubuntu.com/security/cves.json?package={package_name}&limit=1&order=descending&sort_by=published"
     print(f"Querying Ubuntu Security Tracker for {package_name}...")
@@ -38,14 +30,13 @@ def query_ubuntu_security_tracker(package_name, session):
         return []
 
 def clean_description(description):
-    return description.replace("\n", "")
+    return description.replace("\n", " ").strip()
 
-def query_cve_details(cve_id):
+def query_cve_details(cve_id, session):
     try:
-        response = requests.get(f"https://cveawg.mitre.org/api/cve/{cve_id}")
+        response = session.get(f"https://cveawg.mitre.org/api/cve/{cve_id}")
         response.raise_for_status()
         cve_data = response.json()
-
         cve_details = {
             "cveId": cve_id,
             "description": clean_description(cve_data['containers']['cna']['descriptions'][0]['value']),
@@ -60,10 +51,9 @@ def query_cve_details(cve_id):
             ]
         }
         return cve_details
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         print(f"Error querying CVE details for {cve_id}: {e}")
         return None
-
 
 def version_to_tuple(version):
     return tuple(map(int, re.findall(r'\d+', version)))
@@ -82,26 +72,46 @@ def is_version_affected(current_version, affected_version, less_than_version, ve
 def process_package(package, session):
     print(f"Processing package: {package['name']}")
     package['version'] = normalize_version(package['version'])
-    package['is_ubuntu'] = is_ubuntu_package(package['name'])
     package['cve'] = []
-    if package['is_ubuntu']:
-        cve_ids = query_ubuntu_security_tracker(package['name'], session)
-        if cve_ids:
-            for cve_id in cve_ids:
-                cve_details = query_cve_details(cve_id, session)
-                if cve_details:
-                    for affected_version, less_than_version, version_type in cve_details['affectedVersionsRange']:
-                        if is_version_affected(package['version'], affected_version, less_than_version, version_type):
-                            package['cve'].append(cve_details)
-                            break
+    cve_ids = query_ubuntu_security_tracker(package['name'], session)
+    if cve_ids:
+        for cve_id in cve_ids:
+            cve_details = query_cve_details(cve_id, session)
+            if cve_details:
+                for affected_version, less_than_version, version_type in cve_details['affectedVersionsRange']:
+                    if is_version_affected(package['version'], affected_version, less_than_version, version_type):
+                        package['cve'].append(cve_details)
+                        break
     return package
 
+def list_installed_packages():
+    try:
+        print("Listing installed packages using dnf...")
+        dnf_output = subprocess.check_output(['dnf', 'list', 'installed'], stderr=subprocess.DEVNULL)
+        return dnf_output.decode('utf-8').strip()
+    except FileNotFoundError:
+        print("dnf not found, falling back to yum...")
+        yum_output = subprocess.check_output(['yum', 'list', 'installed'], stderr=subprocess.DEVNULL)
+        return yum_output.decode('utf-8').strip()
+
 def generate_packages_json():
-    print("Running dpkg-query to retrieve installed packages...")
-    dpkg_output = subprocess.check_output(["dpkg-query", "-W", "-f", '{"name":"${Package}", "version":"${Version}", "architecture":"${Architecture}"},'])
-    dpkg_output_str = dpkg_output.decode('utf-8').strip()
-    packages_json = '[' + dpkg_output_str[:-1] + ']'
-    packages_data = json.loads(packages_json)
+    package_list_output = list_installed_packages()
+
+    packages_data = []
+    for line in package_list_output.split('\n')[1:]:
+        parts = line.split()
+        if len(parts) >= 3:
+            name_arch, version, repository = parts[0], parts[1], parts[2]
+            if name_arch.startswith('amazon-') or name_arch.startswith('aws-'):
+                continue
+            name, arch = name_arch.rsplit('.', 1)
+            version = normalize_version(version)
+            packages_data.append({
+                "name": name,
+                "version": version,
+                "architecture": arch,
+                "repository": repository
+            })
 
     print("Starting to process packages concurrently...")
     with requests.Session() as session:
@@ -120,8 +130,8 @@ def generate_packages_json():
         "components": packages_data
     }
 
-    print("Writing packages data to installed_packages.json...")
-    with open('installed_packages.json', 'w') as json_file:
+    print("Writing packages data to output.json...")
+    with open('output.json', 'w') as json_file:
         json.dump(sbom, json_file, indent=4)
 
 if __name__ == "__main__":
