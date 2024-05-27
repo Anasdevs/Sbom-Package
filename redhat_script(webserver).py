@@ -30,14 +30,13 @@ def query_ubuntu_security_tracker(package_name, session):
         return []
 
 def clean_description(description):
-    return description.replace("\n", "")
+    return description.replace("\n", " ").strip()
 
 def query_cve_details(cve_id, session):
     try:
         response = session.get(f"https://cveawg.mitre.org/api/cve/{cve_id}")
         response.raise_for_status()
         cve_data = response.json()
-
         cve_details = {
             "cveId": cve_id,
             "description": clean_description(cve_data['containers']['cna']['descriptions'][0]['value']),
@@ -52,7 +51,7 @@ def query_cve_details(cve_id, session):
             ]
         }
         return cve_details
-    except requests.exceptions.RequestException as e:
+    except requests.RequestException as e:
         print(f"Error querying CVE details for {cve_id}: {e}")
         return None
 
@@ -74,7 +73,6 @@ def process_package(package, session):
     print(f"Processing package: {package['name']}")
     package['version'] = normalize_version(package['version'])
     package['cve'] = []
-
     cve_ids = query_ubuntu_security_tracker(package['name'], session)
     if cve_ids:
         for cve_id in cve_ids:
@@ -88,45 +86,37 @@ def process_package(package, session):
 
 def list_installed_packages():
     try:
-        # Use dnf for Red Hat-based systems
+        print("Listing installed packages using dnf...")
         dnf_output = subprocess.check_output(['dnf', 'list', 'installed'], stderr=subprocess.DEVNULL)
-        return dnf_output.decode('utf-8')
-    except subprocess.CalledProcessError:
-        # Fallback to yum for older systems
+        return dnf_output.decode('utf-8').strip()
+    except FileNotFoundError:
+        print("dnf not found, falling back to yum...")
         yum_output = subprocess.check_output(['yum', 'list', 'installed'], stderr=subprocess.DEVNULL)
-        return yum_output.decode('utf-8')
-
-def parse_installed_packages(output):
-    packages = []
-    for line in output.splitlines():
-        if line and not line.startswith('Installed Packages') and not line.startswith(' '):
-            parts = re.split(r'\s+', line)
-            if len(parts) >= 3:
-                name_arch = parts[0].rsplit('.', 1)
-                if len(name_arch) == 2:
-                    name, arch = name_arch
-                    # Filter out unwanted prefixes (e.g., amazon-)
-                    if name.startswith('amazon-'):
-                        name = name.replace('amazon-', '')
-                    version = normalize_version(parts[1].split(':', 1)[-1])
-                    package = {
-                        "name": name,
-                        "version": version,
-                        "architecture": arch,
-                        "repository": parts[2]
-                    }
-                    packages.append(package)
-    return packages
+        return yum_output.decode('utf-8').strip()
 
 def generate_packages_json():
-    print("Listing installed packages...")
     package_list_output = list_installed_packages()
-    parsed_packages = parse_installed_packages(package_list_output)
+
+    packages_data = []
+    for line in package_list_output.split('\n')[1:]:
+        parts = line.split()
+        if len(parts) >= 3:
+            name_arch, version, repository = parts[0], parts[1], parts[2]
+            if name_arch.startswith('amazon-') or name_arch.startswith('aws-'):
+                continue
+            name, arch = name_arch.rsplit('.', 1)
+            version = normalize_version(version)
+            packages_data.append({
+                "name": name,
+                "version": version,
+                "architecture": arch,
+                "repository": repository
+            })
 
     print("Starting to process packages concurrently...")
     with requests.Session() as session:
         with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_package = {executor.submit(process_package, package, session): package for package in parsed_packages}
+            future_to_package = {executor.submit(process_package, package, session): package for package in packages_data}
             for future in as_completed(future_to_package):
                 package = future_to_package[future]
                 try:
@@ -137,11 +127,11 @@ def generate_packages_json():
     sbom = {
         "sbomVersion": "1.0",
         "generatedDate": datetime.now().strftime("%Y-%m-%d"),
-        "components": parsed_packages
+        "components": packages_data
     }
 
-    print("Writing packages data to installed_packages.json...")
-    with open('installed_packages.json', 'w') as json_file:
+    print("Writing packages data to output.json...")
+    with open('output.json', 'w') as json_file:
         json.dump(sbom, json_file, indent=4)
 
 if __name__ == "__main__":
