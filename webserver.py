@@ -138,14 +138,16 @@ def generate_packages_json():
             try:
                 output = subprocess.check_output(["dpkg-query", "-W", "-f={\"name\":\"${Package}\", \"version\":\"${Version}\", \"architecture\":\"${Architecture}\"}", dep])
                 package_data = json.loads(output.decode('utf-8').strip())
-                package_data['running'] = (server == running_web_server)
+                package_data['version'] = normalize_version(package_data['version'])
                 server_packages.append(package_data)
             except subprocess.CalledProcessError as e:
                 print(f"Error fetching package details for {dep}: {e}")
         
         packages.append({
             "name": server,
+            "version": normalize_version(package_data['version']),
             "running": (server == running_web_server),
+            "cve": [],  # CVEs for the main web server
             "dependencies": server_packages
         })
 
@@ -156,7 +158,13 @@ def generate_packages_json():
             for future in as_completed(future_to_package):
                 package = future_to_package[future]
                 try:
-                    future.result()
+                    processed_package = future.result()
+                    for pkg_group in packages:
+                        if pkg_group['name'] == processed_package['name']:
+                            pkg_group['cve'].extend(processed_package['cve'])
+                        for dep in pkg_group['dependencies']:
+                            if dep['name'] == processed_package['name']:
+                                dep.update(processed_package)
                 except Exception as exc:
                     print(f"Package {package['name']} generated an exception: {exc}")
 
