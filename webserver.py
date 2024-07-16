@@ -2,36 +2,45 @@ import subprocess
 import json
 import re
 import requests
-import platform
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-def normalize_version(version):
-    if ':' in version:
-        version = version.split(':')[1]
-    version = re.split(r'[-+]', version)[0]
-    version = re.sub(r'[^0-9.]', '', version)
-    return version
+def normalize_version(version_str):
+    return re.sub(r'[^0-9.]', '', version_str.split(':')[-1].split('-')[0])
+
+def version_to_tuple(version):
+    return tuple(map(int, re.findall(r'\d+', version)))
+
+def is_version_affected(current_version, affected_product):
+    current_v = version_to_tuple(current_version)
+    affected_v = version_to_tuple(affected_product['version']) if affected_product['version'] else None
+    less_than_v = version_to_tuple(affected_product['lessThan']) if affected_product['lessThan'] else None
+    less_than_or_equal_v = version_to_tuple(affected_product['lessThanOrEqual']) if affected_product['lessThanOrEqual'] else None
+
+    if affected_product['versionType'] == 'custom':
+        return (less_than_v is None or current_v < less_than_v) and \
+               (less_than_or_equal_v is None or current_v <= less_than_or_equal_v)
+    elif affected_product['versionType'] == 'semver':
+        return (affected_v is None or current_v >= affected_v) and \
+               (less_than_v is None or current_v < less_than_v) and \
+               (less_than_or_equal_v is None or current_v <= less_than_or_equal_v)
+    return False
 
 def query_ubuntu_security_tracker(package_name, session):
-    url = f"https://ubuntu.com/security/cves.json?package={package_name}&limit=1&order=descending&sort_by=published"
+    url = f"https://ubuntu.com/security/cves.json?package={package_name}&limit=2&order=descending&sort_by=published"
     print(f"Querying Ubuntu Security Tracker for {package_name}...")
     try:
         response = session.get(url)
         response.raise_for_status()
-        try:
-            cves = response.json().get('cves', [])
-            print(f"Found {len(cves)} CVEs for {package_name}")
-            return [cve['id'] for cve in cves]
-        except json.JSONDecodeError:
-            print(f"Invalid JSON response for {package_name}: {response.text}")
-            return []
-    except requests.RequestException as e:
-        print(f"Request failed for {package_name}: {e}")
+        cves = response.json().get('cves', [])
+        print(f"Found {len(cves)} CVEs for {package_name}")
+        return [cve['id'] for cve in cves]
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        print(f"Error querying Ubuntu Security Tracker for {package_name}: {e}")
         return []
 
 def clean_description(description):
-    return description.replace("\n", "").strip()
+    return description.replace("\n", " ").strip()
 
 def query_cve_details(cve_id, session):
     try:
@@ -39,37 +48,39 @@ def query_cve_details(cve_id, session):
         response.raise_for_status()
         cve_data = response.json()
 
+        affected_products = []
+        for affected in cve_data['containers']['cna'].get('affected', []):
+            product = affected.get('product', '')
+            vendor = affected.get('vendor', '')
+            for v in affected.get('versions', []):
+                affected_products.append({
+                    'product': product,
+                    'vendor': vendor,
+                    'version': v.get('version', ''),
+                    'lessThan': v.get('lessThan', ''),
+                    'lessThanOrEqual': v.get('lessThanOrEqual', ''),
+                    'versionType': v.get('versionType', '')
+                })
+
         cve_details = {
             "cveId": cve_id,
             "description": clean_description(cve_data['containers']['cna']['descriptions'][0]['value']),
-            "cvssScore": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['baseScore'],
-            "cvssVector": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['vectorString'],
-            "severity": cve_data['containers']['cna']['metrics'][0]['cvssV3_1']['baseSeverity'],
-            "affectedVersions": [
-                v['version'] for a in cve_data['containers']['cna']['affected'] for v in a['versions']
-            ],
-            "affectedVersionsRange": [
-                (v.get('lessThan'), v.get('version'), v.get('versionType')) for a in cve_data['containers']['cna']['affected'] for v in a['versions']
-            ]
+            "affectedProducts": affected_products
         }
+
+        metrics = cve_data['containers']['cna'].get('metrics', [])
+        if metrics:
+            cvss = metrics[0].get('cvssV3_1', {})
+            cve_details.update({
+                "cvssScore": cvss.get('baseScore', None),
+                "cvssVector": cvss.get('vectorString', ''),
+                "severity": cvss.get('baseSeverity', '')
+            })
+
         return cve_details
     except requests.exceptions.RequestException as e:
         print(f"Error querying CVE details for {cve_id}: {e}")
         return None
-
-def version_to_tuple(version):
-    return tuple(map(int, re.findall(r'\d+', version)))
-
-def is_version_affected(current_version, affected_version, less_than_version, version_type):
-    current_version_tuple = version_to_tuple(current_version)
-    if version_type == 'custom':
-        less_than_version_tuple = version_to_tuple(less_than_version)
-        return current_version_tuple < less_than_version_tuple
-    elif version_type == 'semver':
-        affected_version_tuple = version_to_tuple(affected_version)
-        less_than_version_tuple = version_to_tuple(less_than_version)
-        return affected_version_tuple <= current_version_tuple < less_than_version_tuple
-    return False
 
 def process_package(package, session):
     print(f"Processing package: {package['name']}")
@@ -80,8 +91,8 @@ def process_package(package, session):
         for cve_id in cve_ids:
             cve_details = query_cve_details(cve_id, session)
             if cve_details:
-                for affected_version, less_than_version, version_type in cve_details['affectedVersionsRange']:
-                    if is_version_affected(package['version'], affected_version, less_than_version, version_type):
+                for affected_product in cve_details['affectedProducts']:
+                    if is_version_affected(package['version'], affected_product):
                         package['cve'].append(cve_details)
                         break
     return package
@@ -113,13 +124,25 @@ def get_package_dependencies(package_name):
     try:
         output = subprocess.check_output(["apt-cache", "depends", package_name])
         dependencies = re.findall(r'^\s*Depends:\s*(\S+)', output.decode('utf-8'), re.MULTILINE)
-        return dependencies
+        return [dep for dep in dependencies if not dep.startswith('<')]
     except subprocess.CalledProcessError as e:
         print(f"Error fetching dependencies for {package_name}: {e}")
         return []
 
+def get_package_info(package_name):
+    try:
+        output = subprocess.check_output(["dpkg-query", "-W", "-f=${Package}|${Version}|${Architecture}", package_name])
+        name, version, architecture = output.decode('utf-8').strip().split('|')
+        return {
+            "name": name,
+            "version": normalize_version(version),
+            "architecture": architecture,
+            "cve": []
+        }
+    except subprocess.CalledProcessError:
+        return None
+
 def generate_packages_json():
-    os_type = platform.system()
     installed_web_servers = get_installed_web_servers()
     
     if not installed_web_servers:
@@ -132,39 +155,35 @@ def generate_packages_json():
     for server in installed_web_servers:
         print(f"Web server found: {server}")
         dependencies = get_package_dependencies(server)
-        dependencies.append(server)  # Include the web server itself
-        server_packages = []
-        for dep in dependencies:
-            try:
-                output = subprocess.check_output(["dpkg-query", "-W", "-f={\"name\":\"${Package}\", \"version\":\"${Version}\", \"architecture\":\"${Architecture}\"}", dep])
-                package_data = json.loads(output.decode('utf-8').strip())
-                package_data['version'] = normalize_version(package_data['version'])
-                server_packages.append(package_data)
-            except subprocess.CalledProcessError as e:
-                print(f"Error fetching package details for {dep}: {e}")
+        server_package = get_package_info(server)
         
-        packages.append({
-            "name": server,
-            "version": normalize_version(package_data['version']),
-            "running": (server == running_web_server),
-            "cve": [],  # CVEs for the main web server
-            "dependencies": server_packages
-        })
+        if server_package:
+            server_package['running'] = (server == running_web_server)
+            server_package['dependencies'] = []
+            
+            for dep in dependencies:
+                dep_info = get_package_info(dep)
+                if dep_info:
+                    server_package['dependencies'].append(dep_info)
+            
+            packages.append(server_package)
 
     print("Starting to process packages concurrently...")
     with requests.Session() as session:
         with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_package = {executor.submit(process_package, package, session): package for package_group in packages for package in package_group['dependencies']}
+            all_packages = [pkg for package_group in packages for pkg in [package_group] + package_group['dependencies']]
+            future_to_package = {executor.submit(process_package, package, session): package for package in all_packages}
             for future in as_completed(future_to_package):
                 package = future_to_package[future]
                 try:
                     processed_package = future.result()
                     for pkg_group in packages:
                         if pkg_group['name'] == processed_package['name']:
-                            pkg_group['cve'].extend(processed_package['cve'])
-                        for dep in pkg_group['dependencies']:
-                            if dep['name'] == processed_package['name']:
-                                dep.update(processed_package)
+                            pkg_group.update(processed_package)
+                        else:
+                            for dep in pkg_group['dependencies']:
+                                if dep['name'] == processed_package['name']:
+                                    dep.update(processed_package)
                 except Exception as exc:
                     print(f"Package {package['name']} generated an exception: {exc}")
 
