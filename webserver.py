@@ -39,9 +39,6 @@ def query_ubuntu_security_tracker(package_name, session):
         print(f"Error querying Ubuntu Security Tracker for {package_name}: {e}")
         return []
 
-def clean_description(description):
-    return description.replace("\n", " ").strip()
-
 def query_cve_details(cve_id, session):
     try:
         response = session.get(f"https://cveawg.mitre.org/api/cve/{cve_id}")
@@ -64,7 +61,7 @@ def query_cve_details(cve_id, session):
 
         cve_details = {
             "cveId": cve_id,
-            "description": clean_description(cve_data['containers']['cna']['descriptions'][0]['value']),
+            "description": cve_data['containers']['cna']['descriptions'][0]['value'].replace("\n", " ").strip(),
             "affectedProducts": affected_products
         }
 
@@ -98,27 +95,40 @@ def process_package(package, session):
     return package
 
 def get_installed_web_servers():
-    web_servers = ['apache2', 'nginx']
+    web_servers = [
+        'apache2',
+        'nginx',
+        'lighttpd',
+        'caddy',
+        'h2o',
+        'varnish',
+        'traefik',
+        'haproxy',
+        'squid',
+        'tomcat',
+        'jetty'
+    ]
     installed_web_servers = []
     for server in web_servers:
         try:
-            output = subprocess.check_output(["dpkg-query", "-W", "--showformat=${Status}", server])
-            if 'install ok installed' in output.decode('utf-8').strip():
-                installed_web_servers.append(server)
+            subprocess.check_output(["dpkg", "-s", server], stderr=subprocess.DEVNULL)
+            installed_web_servers.append(server)
+            print(f"Web server found: {server}")
         except subprocess.CalledProcessError:
-            continue
+            pass
     return installed_web_servers
 
-def get_running_web_server():
+def get_running_web_servers(installed_servers):
+    running_servers = []
     try:
         output = subprocess.check_output(["systemctl", "list-units", "--type=service", "--state=running"])
         running_services = output.decode('utf-8').lower()
-        for web_server in ['apache2', 'nginx']:
+        for web_server in installed_servers:
             if web_server in running_services:
-                return web_server
+                running_servers.append(web_server)
     except subprocess.CalledProcessError as e:
         print(f"Error fetching running services: {e}")
-    return None
+    return running_servers
 
 def get_package_dependencies(package_name):
     try:
@@ -149,16 +159,15 @@ def generate_packages_json():
         print("No web servers found.")
         return
 
-    running_web_server = get_running_web_server()
+    running_web_servers = get_running_web_servers(installed_web_servers)
     packages = []
 
     for server in installed_web_servers:
-        print(f"Web server found: {server}")
         dependencies = get_package_dependencies(server)
         server_package = get_package_info(server)
         
         if server_package:
-            server_package['running'] = (server == running_web_server)
+            server_package['running'] = (server in running_web_servers)
             server_package['dependencies'] = []
             
             for dep in dependencies:
