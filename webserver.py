@@ -206,5 +206,8 @@ def generate_packages_json():
     with open('web_server_packages.json', 'w') as json_file:
         json.dump(sbom, json_file, indent=4)
 
-if __name__ == "__main__":
+def main():
     generate_packages_json()
+
+if __name__ == "__main__":
+    main()
