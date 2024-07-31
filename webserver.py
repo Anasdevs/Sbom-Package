@@ -4,6 +4,7 @@ import re
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from time import sleep
 
 def normalize_version(version_str):
     return re.sub(r'[^0-9.]', '', version_str.split(':')[-1].split('-')[0])
@@ -29,15 +30,17 @@ def is_version_affected(current_version, affected_product):
 def query_ubuntu_security_tracker(package_name, session):
     url = f"https://ubuntu.com/security/cves.json?package={package_name}&limit=2&order=descending&sort_by=published"
     print(f"Querying Ubuntu Security Tracker for {package_name}...")
-    try:
-        response = session.get(url)
-        response.raise_for_status()
-        cves = response.json().get('cves', [])
-        print(f"Found {len(cves)} CVEs for {package_name}")
-        return [cve['id'] for cve in cves]
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        print(f"Error querying Ubuntu Security Tracker for {package_name}: {e}")
-        return []
+    for attempt in range(3):
+        try:
+            response = session.get(url)
+            response.raise_for_status()
+            cves = response.json().get('cves', [])
+            print(f"Found {len(cves)} CVEs for {package_name}")
+            return [cve['id'] for cve in cves]
+        except (requests.RequestException, json.JSONDecodeError):
+            print(f"Retrying ({attempt + 1}/3) for {package_name}...")
+            sleep(2)
+    return []
 
 def query_cve_details(cve_id, session):
     try:
@@ -74,9 +77,9 @@ def query_cve_details(cve_id, session):
                 "severity": cvss.get('baseSeverity', '')
             })
 
+        print(f"Retrieved details for CVE: {cve_id}")
         return cve_details
-    except requests.exceptions.RequestException as e:
-        print(f"Error querying CVE details for {cve_id}: {e}")
+    except requests.exceptions.RequestException:
         return None
 
 def process_package(package, session):
@@ -126,8 +129,9 @@ def get_running_web_servers(installed_servers):
         for web_server in installed_servers:
             if web_server in running_services:
                 running_servers.append(web_server)
-    except subprocess.CalledProcessError as e:
-        print(f"Error fetching running services: {e}")
+                print(f"Running web server detected: {web_server}")
+    except subprocess.CalledProcessError:
+        pass
     return running_servers
 
 def get_package_dependencies(package_name):
@@ -135,8 +139,7 @@ def get_package_dependencies(package_name):
         output = subprocess.check_output(["apt-cache", "depends", package_name])
         dependencies = re.findall(r'^\s*Depends:\s*(\S+)', output.decode('utf-8'), re.MULTILINE)
         return [dep for dep in dependencies if not dep.startswith('<')]
-    except subprocess.CalledProcessError as e:
-        print(f"Error fetching dependencies for {package_name}: {e}")
+    except subprocess.CalledProcessError:
         return []
 
 def get_package_info(package_name):
@@ -194,7 +197,7 @@ def generate_packages_json():
                                 if dep['name'] == processed_package['name']:
                                     dep.update(processed_package)
                 except Exception as exc:
-                    print(f"Package {package['name']} generated an exception: {exc}")
+                    print(f"Exception occurred while processing {package['name']}. Skipping.")
 
     sbom = {
         "sbomVersion": "1.0",
@@ -202,9 +205,9 @@ def generate_packages_json():
         "components": packages
     }
 
-    print("Writing packages data to web_server_packages.json...")
     with open('web_server_packages.json', 'w') as json_file:
         json.dump(sbom, json_file, indent=4)
+    print("SBOM generation completed.")
 
 def main():
     generate_packages_json()
