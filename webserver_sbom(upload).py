@@ -210,14 +210,17 @@ def generate_packages_json():
         email = input("Enter your email: ").strip()
         api_key = input("Enter your API key: ").strip()
 
+        sbom_name = f"WebserverSbom_{datetime.now().strftime('%Y-%m-%d')}"
+        sbom['name'] = sbom_name
+
         payload = {
             "email": email,
             "apiKey": api_key,
             "sbom": sbom
         }
 
-        url = "http://localhost:8000/api/auth/apiverify"
-        print("Uploading SBOM to the dashboard...")
+        url = "http://host.docker.internal:8000/api/auth/apiverify"
+        print(f"Uploading SBOM '{sbom_name}' to the dashboard...")
 
         try:
             response = requests.post(url, json=payload)
@@ -234,6 +237,7 @@ def generate_packages_json():
             print(f"An error occurred while uploading the SBOM: {e}")
 
     else:
+        # Save the SBOM locally with a unique filename
         filename = f"sbom_{uuid.uuid4()}.json"
         with open(filename, 'w') as json_file:
             json.dump(sbom, json_file, indent=4)
