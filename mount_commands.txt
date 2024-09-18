@@ -4,7 +4,7 @@ mkdir -p /mnt/ubuntu
 
 #Use qemu-nbd(network block device) to connect the image to a network block device
 
-modprobe nbx max_part=8
+modprobe nbd max_part=8
 qemu-nbd --connect=/dev/nbd0 jammy-server-cloudimg-amd64.img
 
 #identify the partition
