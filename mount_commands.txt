@@ -11,7 +11,7 @@ qemu-nbd --connect=/dev/nbd0 jammy-server-cloudimg-amd64.img
 fdisk -l /dev/nbd0
 
 #mount the partition
-mount /dev/nbd0p1/mnt/ubuntu
+mount /dev/nbd0p1/mnt/ ubuntu
 
 #access the mounted filesystem at /mnt/ubuntu
 
